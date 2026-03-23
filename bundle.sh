@@ -17,6 +17,12 @@ mkdir -p "${MACOS}" "${RESOURCES}"
 
 cp ".build/release/${APP_NAME}" "${MACOS}/${APP_NAME}"
 
+# Copy icon
+if [ -f "AppIcon.icns" ]; then
+    cp "AppIcon.icns" "${RESOURCES}/AppIcon.icns"
+    echo "📎 Icon copied"
+fi
+
 cat > "${CONTENTS}/Info.plist" << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -36,10 +42,10 @@ cat > "${CONTENTS}/Info.plist" << 'EOF'
     <string>LeetCodeTracker</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <key>LSUIElement</key>
-    <true/>
 </dict>
 </plist>
 EOF
