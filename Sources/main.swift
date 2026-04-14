@@ -671,28 +671,40 @@ class FloatingPanel: NSPanel {
         vfx.layer?.masksToBounds = true
         contentView = vfx
     }
+
+    // 点 X 只隐藏窗口，不退出应用
+    override func close() {
+        orderOut(nil)
+    }
 }
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: FloatingPanel?
     var statusItem: NSStatusItem?
+    var statusMenu: NSMenu?
     let store = TrackerStore()
+    var screenObserver: Any?
+    var spaceObserver: Any?
+    var repositionTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu bar icon
+        // Menu bar icon — 左键单击 toggle 窗口，右键弹出菜单
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let btn = statusItem?.button {
             btn.title = "🔥"
+            btn.action = #selector(statusBarClicked(_:))
+            btn.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "显示/隐藏", action: #selector(togglePanel), keyEquivalent: "l"))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "重置进度", action: #selector(resetProgress), keyEquivalent: ""))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
-        statusItem?.menu = menu
+
+        // 右键菜单
+        statusMenu = NSMenu()
+        statusMenu?.addItem(NSMenuItem(title: "显示/隐藏", action: #selector(togglePanel), keyEquivalent: "l"))
+        statusMenu?.addItem(.separator())
+        statusMenu?.addItem(NSMenuItem(title: "重置进度", action: #selector(resetProgress), keyEquivalent: ""))
+        statusMenu?.addItem(.separator())
+        statusMenu?.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
 
         // Floating window
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
@@ -703,6 +715,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let rect = NSRect(x: x, y: y, width: w, height: h)
 
         panel = FloatingPanel(contentRect: rect)
+        panel?.delegate = self
         let hostView = NSHostingView(rootView: TrackerView(store: store))
         hostView.translatesAutoresizingMaskIntoConstraints = false
         panel?.contentView?.addSubview(hostView)
@@ -714,12 +727,95 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 hostView.trailingAnchor.constraint(equalTo: cv.trailingAnchor),
             ])
         }
-        panel?.orderFront(nil)
+        panel?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        // 监听屏幕参数变化（分辨率、全屏切换等）
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            // 延迟一点，等全屏动画完成
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.repositionIfNeeded()
+            }
+        }
+
+        // 监听 Space 切换
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self?.repositionIfNeeded()
+            }
+        }
+
+        // 定时检测（兜底，处理某些全屏切换不触发通知的情况）
+        repositionTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.repositionIfNeeded()
+        }
+    }
+
+    /// 检测是否处于全屏环境，如果是则把面板移到右下角
+    func repositionIfNeeded() {
+        guard let panel = panel, panel.isVisible else { return }
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+
+        let fullFrame = screen.frame
+        let visibleFrame = screen.visibleFrame
+
+        // 全屏判断：visibleFrame 和 frame 几乎一样（菜单栏和 Dock 都被隐藏）
+        let isFullScreen = abs(fullFrame.height - visibleFrame.height) < 10
+            && abs(fullFrame.width - visibleFrame.width) < 10
+
+        if isFullScreen {
+            // 全屏模式：贴到屏幕右下角
+            let panelSize = panel.frame.size
+            let margin: CGFloat = 20
+            let x = visibleFrame.maxX - panelSize.width - margin
+            let y = visibleFrame.origin.y + margin  // 底部
+            let newOrigin = NSPoint(x: x, y: y)
+
+            // 只在位置差距较大时才移动，避免用户手动拖动后被反复重置
+            let currentOrigin = panel.frame.origin
+            let dist = hypot(currentOrigin.x - newOrigin.x, currentOrigin.y - newOrigin.y)
+            if dist > 50 {
+                panel.setFrameOrigin(newOrigin)
+            }
+        }
     }
 
     @objc func togglePanel() {
         if panel?.isVisible == true { panel?.orderOut(nil) }
-        else { panel?.orderFront(nil) }
+        else {
+            panel?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            // 显示后立即检查位置
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self.repositionIfNeeded()
+            }
+        }
+    }
+
+    // 点 X 时拦截关闭，只隐藏窗口
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
+    }
+
+    @objc func statusBarClicked(_ sender: NSStatusBarButton) {
+        guard let event = NSApp.currentEvent else { return }
+        if event.type == .rightMouseUp {
+            // 右键弹出菜单
+            statusItem?.menu = statusMenu
+            statusItem?.button?.performClick(nil)
+            // 弹完菜单后移除，否则左键也会触发菜单
+            DispatchQueue.main.async { self.statusItem?.menu = nil }
+        } else {
+            // 左键 toggle 窗口
+            togglePanel()
+        }
     }
     @objc func resetProgress() {
         let alert = NSAlert()
@@ -736,7 +832,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Entry
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(.accessory)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()
